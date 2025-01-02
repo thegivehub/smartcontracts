@@ -128,3 +128,8 @@ dist
 .yarn/build-state.yml
 .yarn/install-state.gz
 .pnp.*
+/target
+**/*.rs.bk
+.env
+.DS_Store
+node_modules/

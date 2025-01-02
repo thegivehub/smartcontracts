@@ -1,0 +1,29 @@
+name: Deploy Smart Contracts
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    
+    - name: Install Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        override: true
+    
+    - name: Install Soroban CLI
+      run: cargo install soroban-cli
+    
+    - name: Build
+      run: cargo build --release
+    
+    - name: Deploy
+      env:
+        STELLAR_SECRET_KEY: ${{ secrets.STELLAR_SECRET_KEY }}
+      run: ./scripts/deploy.sh

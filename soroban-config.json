@@ -1,0 +1,17 @@
+{
+  "network": "testnet",
+  "rpcUrl": "https://soroban-testnet.stellar.org",
+  "sourceAccount": "YOUR_SOURCE_ACCOUNT",
+  "contracts": {
+    "campaign": {
+      "path": "./contracts/campaign"
+    },
+    "donation": {
+      "path": "./contracts/donation"
+    },
+    "verification": {
+      "path": "./contracts/verification"
+    }
+  }
+}
+

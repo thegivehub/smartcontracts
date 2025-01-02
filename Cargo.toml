@@ -1,0 +1,16 @@
+[workspace]
+members = [
+    "contracts/campaign",
+    "contracts/donation",
+    "contracts/verification"
+]
+
+
+resolver = "2"
+
+[workspace.dependencies]
+soroban-sdk = "20.0.0"
+soroban-token-sdk = "20.0.0"
+stellar-strkey = "0.0.7"
+rand = "0.8.5"
+
