@@ -1,6 +1,6 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contractimpl, contracttype, vec, Address, Env, String, Vec, BytesN,
+    contract, contractimpl, contracttype, vec, Address, Env, String, Vec, symbol_short, Val,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -31,7 +31,7 @@ impl VerificationContract {
     // Initialize milestone
     pub fn create_milestone(
         env: Env,
-        campaign_id: BytesN<32>,
+        campaign_id: Address,
         description: String,
         amount: i128,
     ) -> Milestone {
@@ -44,12 +44,12 @@ impl VerificationContract {
             completed_at: None,
         };
 
-        let mut milestones = env.storage().get(&campaign_id)
+        let mut milestones = env.storage().persistent().get(&campaign_id)
             .map(|m: Vec<Milestone>| m)
             .unwrap_or_else(|| vec![&env]);
         
         milestones.push_back(milestone.clone());
-        env.storage().set(&campaign_id, &milestones);
+        env.storage().persistent().set(&campaign_id, &milestones);
 
         milestone
     }
@@ -57,14 +57,14 @@ impl VerificationContract {
     // Submit milestone verification
     pub fn verify_milestone(
         env: Env,
-        campaign_id: BytesN<32>,
+        campaign_id: Address,
         milestone_index: u32,
         verifier: Address,
         docs: Vec<String>,
     ) -> Milestone {
         verifier.require_auth();
 
-        let mut milestones: Vec<Milestone> = env.storage().get(&campaign_id).unwrap();
+        let mut milestones: Vec<Milestone> = env.storage().persistent().get(&campaign_id).unwrap();
         let mut milestone = milestones.get(milestone_index).unwrap();
         
         if milestone.status != MilestoneStatus::Pending {
@@ -76,7 +76,7 @@ impl VerificationContract {
         milestone.verification_docs = docs;
         
         milestones.set(milestone_index, milestone.clone());
-        env.storage().set(&campaign_id, &milestones);
+        env.storage().persistent().set(&campaign_id, &milestones);
 
         milestone
     }
@@ -84,11 +84,11 @@ impl VerificationContract {
     // Release milestone funds
     pub fn complete_milestone(
         env: Env,
-        campaign_id: BytesN<32>,
+        campaign_id: Address,
         milestone_index: u32,
         token: Address,
     ) -> Milestone {
-        let mut milestones: Vec<Milestone> = env.storage().get(&campaign_id).unwrap();
+        let mut milestones: Vec<Milestone> = env.storage().persistent().get(&campaign_id).unwrap();
         let mut milestone = milestones.get(milestone_index).unwrap();
 
         if milestone.status != MilestoneStatus::Verified {
@@ -98,8 +98,8 @@ impl VerificationContract {
         // Get campaign creator address
         let creator: Address = env.invoke_contract(
             &campaign_id,
-            &symbol_short!("get_creator"),
-            &[],
+            &symbol_short!("creator"),
+            Vec::<Val>::new(&env),
         );
 
         // Transfer tokens to creator
@@ -114,20 +114,20 @@ impl VerificationContract {
         milestone.completed_at = Some(env.ledger().timestamp());
         
         milestones.set(milestone_index, milestone.clone());
-        env.storage().set(&campaign_id, &milestones);
+        env.storage().persistent().set(&campaign_id, &milestones);
 
         milestone
     }
 
     // View functions
-    pub fn get_milestones(env: Env, campaign_id: BytesN<32>) -> Vec<Milestone> {
-        env.storage().get(&campaign_id)
+    pub fn get_milestones(env: Env, campaign_id: Address) -> Vec<Milestone> {
+        env.storage().persistent().get(&campaign_id)
             .map(|m: Vec<Milestone>| m)
             .unwrap_or_else(|| vec![&env])
     }
 
-    pub fn get_milestone(env: Env, campaign_id: BytesN<32>, index: u32) -> Milestone {
-        let milestones: Vec<Milestone> = env.storage().get(&campaign_id).unwrap();
+    pub fn get_milestone(env: Env, campaign_id: Address, index: u32) -> Milestone {
+        let milestones: Vec<Milestone> = env.storage().persistent().get(&campaign_id).unwrap();
         milestones.get(index).unwrap()
     }
 }

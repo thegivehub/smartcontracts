@@ -1,7 +1,7 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contractimpl, contracttype, vec, Address, Env, String, Symbol, Vec,
-    Map, BytesN, ConversionError, TryFromVal, Val,
+    contract, contractimpl, contracttype, Address, Env, String, 
+    Map, 
 };
 
 // Campaign status enum
@@ -19,7 +19,7 @@ pub enum CampaignStatus {
 #[derive(Clone, Debug)]
 #[contracttype]
 pub struct Campaign {
-    id: BytesN<32>,
+    id: Address,
     title: String,
     description: String,
     target_amount: i128,
@@ -38,7 +38,7 @@ impl CampaignContract {
     // Initialize a new campaign
     pub fn initialize(
         env: Env,
-        id: BytesN<32>,
+        id: Address,
         title: String,
         description: String,
         target_amount: i128,
@@ -62,13 +62,13 @@ impl CampaignContract {
             created_at: env.ledger().timestamp(),
         };
 
-        env.storage().set(&id, &campaign);
+        env.storage().persistent().set(&id, &campaign);
         campaign
     }
 
     // Activate campaign
-    pub fn activate_campaign(env: Env, campaign_id: BytesN<32>) -> Campaign {
-        let mut campaign: Campaign = env.storage().get(&campaign_id).unwrap();
+    pub fn activate_campaign(env: Env, campaign_id: Address) -> Campaign {
+        let mut campaign: Campaign = env.storage().persistent().get(&campaign_id).unwrap();
         campaign.creator.require_auth();
 
         if campaign.status != CampaignStatus::Draft {
@@ -76,27 +76,27 @@ impl CampaignContract {
         }
 
         campaign.status = CampaignStatus::Active;
-        env.storage().set(&campaign_id, &campaign);
+        env.storage().persistent().set(&campaign_id, &campaign);
         campaign
     }
 
     // Update campaign status
-    pub fn update_status(env: Env, campaign_id: BytesN<32>, new_status: CampaignStatus) -> Campaign {
-        let mut campaign: Campaign = env.storage().get(&campaign_id).unwrap();
+    pub fn update_status(env: Env, campaign_id: Address, new_status: CampaignStatus) -> Campaign {
+        let mut campaign: Campaign = env.storage().persistent().get(&campaign_id).unwrap();
         campaign.creator.require_auth();
 
         campaign.status = new_status;
-        env.storage().set(&campaign_id, &campaign);
+        env.storage().persistent().set(&campaign_id, &campaign);
         campaign
     }
 
     // View functions
-    pub fn get_campaign(env: Env, campaign_id: BytesN<32>) -> Campaign {
-        env.storage().get(&campaign_id).unwrap()
+    pub fn get_campaign(env: Env, campaign_id: Address) -> Campaign {
+        env.storage().persistent().get(&campaign_id).unwrap()
     }
 
-    pub fn get_campaign_status(env: Env, campaign_id: BytesN<32>) -> CampaignStatus {
-        let campaign: Campaign = env.storage().get(&campaign_id).unwrap();
+    pub fn get_campaign_status(env: Env, campaign_id: Address) -> CampaignStatus {
+        let campaign: Campaign = env.storage().persistent().get(&campaign_id).unwrap();
         campaign.status
     }
 }

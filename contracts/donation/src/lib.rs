@@ -1,12 +1,12 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contractimpl, contracttype, Address, Env, BytesN, Map,
+    contract, contractimpl, contracttype, Address, Env, Map, Vec, symbol_short, vec, Val,
 };
 
 #[derive(Clone, Debug)]
 #[contracttype]
 pub struct Donation {
-    campaign_id: BytesN<32>,
+    campaign_id: Address,
     donor: Address,
     amount: i128,
     timestamp: u64,
@@ -20,7 +20,7 @@ impl DonationContract {
     // Process donation
     pub fn donate(
         env: Env,
-        campaign_id: BytesN<32>,
+        campaign_id: Address,
         donor: Address,
         amount: i128,
         token: Address,
@@ -28,7 +28,7 @@ impl DonationContract {
         donor.require_auth();
 
         // Call campaign contract to check status
-        let campaign_client = env.invoke_contract::<bool>(&campaign_id, &symbol_short!("is_active"), &[]);
+        let campaign_client = env.invoke_contract::<bool>(&campaign_id, &symbol_short!("is_active"), Vec::<Val>::new(&env));
         if !campaign_client {
             panic!("Campaign not active");
         }
@@ -45,7 +45,7 @@ impl DonationContract {
         };
 
         // Store donation record
-        let mut donations = env.storage().get(&campaign_id)
+        let mut donations = env.storage().persistent().get(&campaign_id)
             .map(|m: Map<Address, Vec<Donation>>| m)
             .unwrap_or_else(|| Map::new(&env));
         
@@ -54,13 +54,13 @@ impl DonationContract {
         donor_donations.push_back(donation.clone());
         donations.set(donor, donor_donations);
         
-        env.storage().set(&campaign_id, &donations);
+        env.storage().persistent().set(&campaign_id, &donations);
 
         // Update campaign balance
         env.invoke_contract::<()>(
             &campaign_id,
-            &symbol_short!("update_balance"),
-            &[amount.into()],
+            &symbol_short!("upd_bal"),
+            Vec::<Val>::from_slice(&env, &[Val::from(amount)])
         );
 
         donation
@@ -69,19 +69,19 @@ impl DonationContract {
     // Get donor's donations for a campaign
     pub fn get_donations(
         env: Env,
-        campaign_id: BytesN<32>,
+        campaign_id: Address,
         donor: Address,
     ) -> Vec<Donation> {
-        let donations: Map<Address, Vec<Donation>> = env.storage().get(&campaign_id).unwrap();
+        let donations: Map<Address, Vec<Donation>> = env.storage().persistent().get(&campaign_id).unwrap();
         donations.get(donor).unwrap_or_else(|| vec![&env])
     }
 
     // Get total donated amount for a campaign
     pub fn get_total_donated(
         env: Env,
-        campaign_id: BytesN<32>,
+        campaign_id: Address,
     ) -> i128 {
-        let donations: Map<Address, Vec<Donation>> = env.storage().get(&campaign_id).unwrap();
+        let donations: Map<Address, Vec<Donation>> = env.storage().persistent().get(&campaign_id).unwrap();
         let mut total = 0;
         for donor_donations in donations.values() {
             for donation in donor_donations.iter() {

@@ -6,7 +6,7 @@
 set -e  # Exit on error
 
 if [ -z "$1" ]; then
-    PROJECT_DIR="givehub-contracts"
+    PROJECT_DIR="./build"
 else
     PROJECT_DIR="$1"
 fi
@@ -19,9 +19,12 @@ cd "$PROJECT_DIR"
 
 # Create directory structure
 mkdir -p .github/workflows
-mkdir -p contracts/{campaign,donation,verification}/src
+mkdir -p contracts/campaign/src
+mkdir -p contracts/donation/src
+mkdir -p contracts/verification/src
 mkdir -p scripts
-mkdir -p tests/{integration,utils}
+mkdir -p tests/integration
+mkdir -p tests/utils
 
 # Create GitHub Actions workflow files
 cat > .github/workflows/test.yml << 'EOL'
@@ -125,12 +128,15 @@ soroban-token-sdk = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+
+[features]
+testutils = []
 EOL
 
     # Create default lib.rs files
     cat > "contracts/$contract/src/lib.rs" << 'EOL'
 #![no_std]
-use soroban_sdk::{contract, contractimpl, log, symbol_short, vec, Env, Symbol, Vec};
+use soroban_sdk::{contract, contractimpl, symbol_short, vec, Env, Symbol, Vec};
 
 #[contract]
 pub struct Contract;
