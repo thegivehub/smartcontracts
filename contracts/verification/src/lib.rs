@@ -1,9 +1,11 @@
 #![no_std]
+use givehub_campaign::CampaignContractClient;
 use soroban_sdk::{
-    contract, contractimpl, contracttype, vec, Address, Env, String, Vec, symbol_short, Val,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, vec, Address, BytesN,
+    Env, String, Vec,
 };
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[contracttype]
 pub enum MilestoneStatus {
     Pending,
@@ -12,15 +14,25 @@ pub enum MilestoneStatus {
     Failed,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 #[contracttype]
 pub struct Milestone {
-    description: String,
-    amount: i128,
-    status: MilestoneStatus,
-    verification_docs: Vec<String>,
-    verified_by: Option<Address>,
-    completed_at: Option<u64>,
+    pub description: String,
+    pub amount: i128,
+    pub status: MilestoneStatus,
+    pub verification_docs: Vec<String>,
+    pub verified_by: Option<Address>,
+    pub completed_at: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[contracterror]
+#[repr(i32)]
+pub enum VerificationError {
+    InvalidAmount = 1,
+    MilestoneNotFound = 2,
+    MilestoneNotPending = 3,
+    MilestoneNotVerified = 4,
 }
 
 #[contract]
@@ -28,13 +40,16 @@ pub struct VerificationContract;
 
 #[contractimpl]
 impl VerificationContract {
-    // Initialize milestone
     pub fn create_milestone(
         env: Env,
-        campaign_id: Address,
+        campaign_id: BytesN<32>,
         description: String,
         amount: i128,
     ) -> Milestone {
+        if amount <= 0 {
+            panic_with_error!(&env, VerificationError::InvalidAmount);
+        }
+
         let milestone = Milestone {
             description,
             amount,
@@ -44,149 +59,144 @@ impl VerificationContract {
             completed_at: None,
         };
 
-        let mut milestones = env.storage().persistent().get(&campaign_id)
-            .map(|m: Vec<Milestone>| m)
+        let mut milestones: Vec<Milestone> = env
+            .storage()
+            .persistent()
+            .get(&campaign_id)
             .unwrap_or_else(|| vec![&env]);
-        
+
         milestones.push_back(milestone.clone());
         env.storage().persistent().set(&campaign_id, &milestones);
-
         milestone
     }
 
-    // Submit milestone verification
     pub fn verify_milestone(
         env: Env,
-        campaign_id: Address,
-        milestone_index: u32,
         verifier: Address,
+        campaign_id: BytesN<32>,
+        milestone_index: u32,
         docs: Vec<String>,
     ) -> Milestone {
         verifier.require_auth();
 
-        let mut milestones: Vec<Milestone> = env.storage().persistent().get(&campaign_id).unwrap();
-        let mut milestone = milestones.get(milestone_index).unwrap();
-        
+        let mut milestones: Vec<Milestone> = env
+            .storage()
+            .persistent()
+            .get(&campaign_id)
+            .unwrap_or_else(|| panic_with_error!(&env, VerificationError::MilestoneNotFound));
+
+        let mut milestone = milestones
+            .get(milestone_index)
+            .unwrap_or_else(|| panic_with_error!(&env, VerificationError::MilestoneNotFound));
+
         if milestone.status != MilestoneStatus::Pending {
-            panic!("Milestone not pending");
+            panic_with_error!(&env, VerificationError::MilestoneNotPending);
         }
 
         milestone.status = MilestoneStatus::Verified;
         milestone.verified_by = Some(verifier);
         milestone.verification_docs = docs;
-        
+
         milestones.set(milestone_index, milestone.clone());
         env.storage().persistent().set(&campaign_id, &milestones);
-
         milestone
     }
 
-    // Release milestone funds
     pub fn complete_milestone(
         env: Env,
-        campaign_id: Address,
+        campaign_contract: Address,
+        campaign_id: BytesN<32>,
         milestone_index: u32,
-        token: Address,
     ) -> Milestone {
-        let mut milestones: Vec<Milestone> = env.storage().persistent().get(&campaign_id).unwrap();
-        let mut milestone = milestones.get(milestone_index).unwrap();
+        let mut milestones: Vec<Milestone> = env
+            .storage()
+            .persistent()
+            .get(&campaign_id)
+            .unwrap_or_else(|| panic_with_error!(&env, VerificationError::MilestoneNotFound));
+
+        let mut milestone = milestones
+            .get(milestone_index)
+            .unwrap_or_else(|| panic_with_error!(&env, VerificationError::MilestoneNotFound));
 
         if milestone.status != MilestoneStatus::Verified {
-            panic!("Milestone not verified");
+            panic_with_error!(&env, VerificationError::MilestoneNotVerified);
         }
 
-        // Get campaign creator address
-        let creator: Address = env.invoke_contract(
-            &campaign_id,
-            &symbol_short!("creator"),
-            Vec::<Val>::new(&env),
-        );
-
-        // Transfer tokens to creator
-        let client = soroban_sdk::token::Client::new(&env, &token);
-        client.transfer(
-            &env.current_contract_address(),
-            &creator,
-            &milestone.amount,
-        );
+        let campaign_client = CampaignContractClient::new(&env, &campaign_contract);
+        campaign_client.mark_milestone_completed(&campaign_id, &milestone.amount);
 
         milestone.status = MilestoneStatus::Completed;
         milestone.completed_at = Some(env.ledger().timestamp());
-        
+
         milestones.set(milestone_index, milestone.clone());
         env.storage().persistent().set(&campaign_id, &milestones);
-
         milestone
     }
 
-    // View functions
-    pub fn get_milestones(env: Env, campaign_id: Address) -> Vec<Milestone> {
-        env.storage().persistent().get(&campaign_id)
-            .map(|m: Vec<Milestone>| m)
+    pub fn get_milestones(env: Env, campaign_id: BytesN<32>) -> Vec<Milestone> {
+        env.storage()
+            .persistent()
+            .get(&campaign_id)
             .unwrap_or_else(|| vec![&env])
     }
 
-    pub fn get_milestone(env: Env, campaign_id: Address, index: u32) -> Milestone {
-        let milestones: Vec<Milestone> = env.storage().persistent().get(&campaign_id).unwrap();
-        milestones.get(index).unwrap()
+    pub fn get_milestone(env: Env, campaign_id: BytesN<32>, index: u32) -> Milestone {
+        let milestones: Vec<Milestone> = env
+            .storage()
+            .persistent()
+            .get(&campaign_id)
+            .unwrap_or_else(|| panic_with_error!(&env, VerificationError::MilestoneNotFound));
+        milestones
+            .get(index)
+            .unwrap_or_else(|| panic_with_error!(&env, VerificationError::MilestoneNotFound))
     }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::testutils::{Address as _, Ledger};
+    use givehub_campaign::{CampaignContract, CampaignContractClient};
+    use soroban_sdk::{testutils::Address as _, Env, String};
 
     #[test]
     fn test_milestone_lifecycle() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, VerificationContract);
-        
-        let campaign_id = BytesN::from_array(&env, &[0; 32]);
-        let verifier = Address::random(&env);
-        
-        let milestone = VerificationContract::create_milestone(
-            &env,
-            &contract_id,
-            campaign_id.clone(),
-            String::from_str(&env, "Test Milestone"),
-            1000,
+        env.mock_all_auths();
+        let campaign_addr = env.register_contract(None, CampaignContract);
+        let verification_addr = env.register_contract(None, VerificationContract);
+
+        let campaign_client = CampaignContractClient::new(&env, &campaign_addr);
+        let verification_client = VerificationContractClient::new(&env, &verification_addr);
+
+        let creator = Address::generate(&env);
+        let verifier = Address::generate(&env);
+        let campaign_id = BytesN::from_array(&env, &[1; 32]);
+
+        campaign_client.initialize(
+            &creator,
+            &campaign_id,
+            &String::from_str(&env, "Build wells"),
+            &String::from_str(&env, "Provide clean water"),
+            &1000,
+        );
+
+        campaign_client.activate(&creator, &campaign_id);
+        campaign_client.add_donation(&campaign_id, &500);
+
+        let milestone = verification_client.create_milestone(
+            &campaign_id,
+            &String::from_str(&env, "Drill first well"),
+            &400,
         );
 
         assert_eq!(milestone.status, MilestoneStatus::Pending);
-        
-        let docs = vec![&env, String::from_str(&env, "verification.pdf")];
-        
-        let verified_milestone = VerificationContract::verify_milestone(
-            &env,
-            &contract_id,
-            campaign_id.clone(),
-            0,
-            verifier.clone(),
-            docs,
-        );
 
-        assert_eq!(verified_milestone.status, MilestoneStatus::Verified);
-        assert_eq!(verified_milestone.verified_by, Some(verifier));
-        
-        // Mock campaign creator for testing
-        let creator = Address::random(&env);
-        env.register_contract_rust(
-            &campaign_id,
-            mockutil::make_mock_contract(move |_, _, _| Ok(creator.into())),
-        );
-        
-        let token = env.register_stellar_asset_contract(creator.clone());
-        
-        let completed_milestone = VerificationContract::complete_milestone(
-            &env,
-            &contract_id,
-            campaign_id.clone(),
-            0,
-            token.clone(),
-        );
+        let docs = vec![&env, String::from_str(&env, "report.pdf")];
+        let verified = verification_client.verify_milestone(&verifier, &campaign_id, &0, &docs);
+        assert_eq!(verified.status, MilestoneStatus::Verified);
 
-        assert_eq!(completed_milestone.status, MilestoneStatus::Completed);
-        assert!(completed_milestone.completed_at.is_some());
+        let completed = verification_client.complete_milestone(&campaign_addr, &campaign_id, &0);
+        assert_eq!(completed.status, MilestoneStatus::Completed);
+        assert!(completed.completed_at.is_some());
     }
 }

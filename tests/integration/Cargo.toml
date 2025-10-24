@@ -1,0 +1,13 @@
+[package]
+name = "integration-tests"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+givehub-campaign = { path = "../../contracts/campaign" }
+givehub-donation = { path = "../../contracts/donation" }
+givehub-verification = { path = "../../contracts/verification" }
