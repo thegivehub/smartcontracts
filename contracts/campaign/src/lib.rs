@@ -1,11 +1,10 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contractimpl, contracttype, Address, Env, String, 
-    Map, 
+    contract, contracterror, contractimpl, contracttype, panic_with_error, Address, BytesN, Env,
+    String,
 };
 
-// Campaign status enum
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[contracttype]
 pub enum CampaignStatus {
     Draft,
@@ -15,19 +14,30 @@ pub enum CampaignStatus {
     Cancelled,
 }
 
-// Campaign struct
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 #[contracttype]
 pub struct Campaign {
-    id: Address,
-    title: String,
-    description: String,
-    target_amount: i128,
-    current_amount: i128,
-    creator: Address,
-    status: CampaignStatus,
-    donors: Map<Address, i128>,
-    created_at: u64,
+    pub id: BytesN<32>,
+    pub title: String,
+    pub description: String,
+    pub target_amount: i128,
+    pub current_amount: i128,
+    pub released_amount: i128,
+    pub creator: Address,
+    pub status: CampaignStatus,
+    pub created_at: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[contracterror]
+#[repr(i32)]
+pub enum CampaignError {
+    CampaignNotFound = 1,
+    InvalidTarget = 2,
+    NotDraft = 3,
+    NotActive = 4,
+    Unauthorized = 5,
+    InsufficientFunds = 6,
 }
 
 #[contract]
@@ -35,106 +45,172 @@ pub struct CampaignContract;
 
 #[contractimpl]
 impl CampaignContract {
-    // Initialize a new campaign
     pub fn initialize(
         env: Env,
-        id: Address,
+        creator: Address,
+        campaign_id: BytesN<32>,
         title: String,
         description: String,
         target_amount: i128,
-        creator: Address,
     ) -> Campaign {
         creator.require_auth();
 
         if target_amount <= 0 {
-            panic!("Target amount must be positive");
+            panic_with_error!(&env, CampaignError::InvalidTarget);
         }
 
         let campaign = Campaign {
-            id,
+            id: campaign_id.clone(),
             title,
             description,
             target_amount,
             current_amount: 0,
-            creator,
+            released_amount: 0,
+            creator: creator.clone(),
             status: CampaignStatus::Draft,
-            donors: Map::new(&env),
             created_at: env.ledger().timestamp(),
         };
 
-        env.storage().persistent().set(&id, &campaign);
+        env.storage().persistent().set(&campaign_id, &campaign);
         campaign
     }
 
-    // Activate campaign
-    pub fn activate_campaign(env: Env, campaign_id: Address) -> Campaign {
-        let mut campaign: Campaign = env.storage().persistent().get(&campaign_id).unwrap();
-        campaign.creator.require_auth();
+    pub fn activate(env: Env, creator: Address, campaign_id: BytesN<32>) -> Campaign {
+        creator.require_auth();
 
+        let mut campaign = Self::get_campaign(&env, &campaign_id);
+        if campaign.creator != creator {
+            panic_with_error!(&env, CampaignError::Unauthorized);
+        }
         if campaign.status != CampaignStatus::Draft {
-            panic!("Campaign must be in draft status");
+            panic_with_error!(&env, CampaignError::NotDraft);
         }
 
         campaign.status = CampaignStatus::Active;
-        env.storage().persistent().set(&campaign_id, &campaign);
+        Self::save_campaign(&env, &campaign_id, &campaign);
         campaign
     }
 
-    // Update campaign status
-    pub fn update_status(env: Env, campaign_id: Address, new_status: CampaignStatus) -> Campaign {
-        let mut campaign: Campaign = env.storage().persistent().get(&campaign_id).unwrap();
-        campaign.creator.require_auth();
+    pub fn add_donation(env: Env, campaign_id: BytesN<32>, amount: i128) -> Campaign {
+        let mut campaign = Self::get_campaign(&env, &campaign_id);
+        if campaign.status != CampaignStatus::Active && campaign.status != CampaignStatus::Funded {
+            panic_with_error!(&env, CampaignError::NotActive);
+        }
 
-        campaign.status = new_status;
-        env.storage().persistent().set(&campaign_id, &campaign);
+        campaign.current_amount += amount;
+        if campaign.current_amount >= campaign.target_amount
+            && campaign.status == CampaignStatus::Active
+        {
+            campaign.status = CampaignStatus::Funded;
+        }
+
+        Self::save_campaign(&env, &campaign_id, &campaign);
         campaign
     }
 
-    // View functions
-    pub fn get_campaign(env: Env, campaign_id: Address) -> Campaign {
-        env.storage().persistent().get(&campaign_id).unwrap()
+    pub fn mark_milestone_completed(env: Env, campaign_id: BytesN<32>, amount: i128) -> Campaign {
+        let mut campaign = Self::get_campaign(&env, &campaign_id);
+        let available = campaign.current_amount - campaign.released_amount;
+        if available < amount {
+            panic_with_error!(&env, CampaignError::InsufficientFunds);
+        }
+
+        campaign.released_amount += amount;
+        if campaign.released_amount >= campaign.target_amount {
+            campaign.status = CampaignStatus::Completed;
+        }
+
+        Self::save_campaign(&env, &campaign_id, &campaign);
+        campaign
     }
 
-    pub fn get_campaign_status(env: Env, campaign_id: Address) -> CampaignStatus {
-        let campaign: Campaign = env.storage().persistent().get(&campaign_id).unwrap();
+    pub fn cancel(env: Env, creator: Address, campaign_id: BytesN<32>) -> Campaign {
+        creator.require_auth();
+
+        let mut campaign = Self::get_campaign(&env, &campaign_id);
+        if campaign.creator != creator {
+            panic_with_error!(&env, CampaignError::Unauthorized);
+        }
+
+        campaign.status = CampaignStatus::Cancelled;
+        Self::save_campaign(&env, &campaign_id, &campaign);
+        campaign
+    }
+
+    pub fn get(env: Env, campaign_id: BytesN<32>) -> Campaign {
+        Self::get_campaign(&env, &campaign_id)
+    }
+
+    pub fn status(env: Env, campaign_id: BytesN<32>) -> CampaignStatus {
+        let campaign = Self::get_campaign(&env, &campaign_id);
         campaign.status
+    }
+
+    pub fn is_active(env: Env, campaign_id: BytesN<32>) -> bool {
+        let campaign = Self::get_campaign(&env, &campaign_id);
+        matches!(
+            campaign.status,
+            CampaignStatus::Active | CampaignStatus::Funded
+        )
+    }
+
+    pub fn creator(env: Env, campaign_id: BytesN<32>) -> Address {
+        let campaign = Self::get_campaign(&env, &campaign_id);
+        campaign.creator
+    }
+
+    pub fn available_funds(env: Env, campaign_id: BytesN<32>) -> i128 {
+        let campaign = Self::get_campaign(&env, &campaign_id);
+        campaign.current_amount - campaign.released_amount
+    }
+
+    fn get_campaign(env: &Env, campaign_id: &BytesN<32>) -> Campaign {
+        env.storage()
+            .persistent()
+            .get(campaign_id)
+            .unwrap_or_else(|| panic_with_error!(env, CampaignError::CampaignNotFound))
+    }
+
+    fn save_campaign(env: &Env, campaign_id: &BytesN<32>, campaign: &Campaign) {
+        env.storage().persistent().set(campaign_id, campaign);
     }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::testutils::{Address as _, Ledger};
+    use soroban_sdk::{testutils::Address as _, Env, String};
 
     #[test]
     fn test_campaign_lifecycle() {
         let env = Env::default();
+        env.mock_all_auths();
         let contract_id = env.register_contract(None, CampaignContract);
-        
-        let creator = Address::random(&env);
+        let client = CampaignContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
         let campaign_id = BytesN::from_array(&env, &[0; 32]);
-        let title = String::from_str(&env, "Test Campaign");
-        let description = String::from_str(&env, "Test Description");
-        let target_amount = 1000;
 
-        let campaign = CampaignContract::initialize(
-            &env,
-            &contract_id,
-            campaign_id.clone(),
-            title,
-            description,
-            target_amount,
-            creator.clone(),
+        let campaign = client.initialize(
+            &creator,
+            &campaign_id,
+            &String::from_str(&env, "Test Campaign"),
+            &String::from_str(&env, "Test Description"),
+            &1000,
         );
-
         assert_eq!(campaign.status, CampaignStatus::Draft);
-        
-        let active_campaign = CampaignContract::activate_campaign(
-            &env,
-            &contract_id,
-            campaign_id.clone(),
-        );
 
+        let active_campaign = client.activate(&creator, &campaign_id);
         assert_eq!(active_campaign.status, CampaignStatus::Active);
+
+        let updated = client.add_donation(&campaign_id, &600);
+        assert_eq!(updated.current_amount, 600);
+        assert!(client.is_active(&campaign_id));
+
+        let funded = client.add_donation(&campaign_id, &500);
+        assert_eq!(funded.status, CampaignStatus::Funded);
+
+        let completed = client.mark_milestone_completed(&campaign_id, &1100);
+        assert_eq!(completed.status, CampaignStatus::Completed);
     }
 }
