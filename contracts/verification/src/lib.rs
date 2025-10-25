@@ -1,8 +1,9 @@
 #![no_std]
 use givehub_campaign::CampaignContractClient;
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, vec, Address, BytesN,
-    Env, String, Vec,
+    auth::{ContractContext, InvokerContractAuthEntry, SubContractInvocation},
+    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, vec,
+    Address, BytesN, Env, IntoVal, String, Symbol, Vec,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -25,6 +26,14 @@ pub struct Milestone {
     pub completed_at: Option<u64>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+pub struct VerificationConfig {
+    pub campaign_contract: Address,
+    pub owner: Address,
+    pub verifier: Address,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[contracterror]
 #[repr(i32)]
@@ -33,6 +42,8 @@ pub enum VerificationError {
     MilestoneNotFound = 2,
     MilestoneNotPending = 3,
     MilestoneNotVerified = 4,
+    Unauthorized = 5,
+    NotConfigured = 6,
 }
 
 #[contract]
@@ -40,14 +51,47 @@ pub struct VerificationContract;
 
 #[contractimpl]
 impl VerificationContract {
+    pub fn configure_campaign(
+        env: Env,
+        owner: Address,
+        campaign_contract: Address,
+        campaign_id: BytesN<32>,
+        verifier: Address,
+    ) -> VerificationConfig {
+        owner.require_auth();
+
+        let campaign_client = CampaignContractClient::new(&env, &campaign_contract);
+        let campaign_owner = campaign_client.creator(&campaign_id);
+        if campaign_owner != owner {
+            panic_with_error!(&env, VerificationError::Unauthorized);
+        }
+
+        let config = VerificationConfig {
+            campaign_contract,
+            owner,
+            verifier,
+        };
+
+        let key = (symbol_short!("cfg"), campaign_id.clone());
+        env.storage().persistent().set(&key, &config);
+        config
+    }
+
     pub fn create_milestone(
         env: Env,
+        owner: Address,
         campaign_id: BytesN<32>,
         description: String,
         amount: i128,
     ) -> Milestone {
         if amount <= 0 {
             panic_with_error!(&env, VerificationError::InvalidAmount);
+        }
+
+        owner.require_auth();
+        let config = Self::read_config(&env, &campaign_id);
+        if config.owner != owner {
+            panic_with_error!(&env, VerificationError::Unauthorized);
         }
 
         let milestone = Milestone {
@@ -79,6 +123,11 @@ impl VerificationContract {
     ) -> Milestone {
         verifier.require_auth();
 
+        let config = Self::read_config(&env, &campaign_id);
+        if config.verifier != verifier {
+            panic_with_error!(&env, VerificationError::Unauthorized);
+        }
+
         let mut milestones: Vec<Milestone> = env
             .storage()
             .persistent()
@@ -104,10 +153,17 @@ impl VerificationContract {
 
     pub fn complete_milestone(
         env: Env,
-        campaign_contract: Address,
+        verifier: Address,
         campaign_id: BytesN<32>,
         milestone_index: u32,
     ) -> Milestone {
+        verifier.require_auth();
+
+        let config = Self::read_config(&env, &campaign_id);
+        if config.verifier != verifier {
+            panic_with_error!(&env, VerificationError::Unauthorized);
+        }
+
         let mut milestones: Vec<Milestone> = env
             .storage()
             .persistent()
@@ -122,7 +178,21 @@ impl VerificationContract {
             panic_with_error!(&env, VerificationError::MilestoneNotVerified);
         }
 
-        let campaign_client = CampaignContractClient::new(&env, &campaign_contract);
+        let auth_entry = InvokerContractAuthEntry::Contract(SubContractInvocation {
+            context: ContractContext {
+                contract: config.campaign_contract.clone(),
+                fn_name: Symbol::new(&env, "mark_milestone_completed"),
+                args: vec![
+                    &env,
+                    campaign_id.clone().into_val(&env),
+                    milestone.amount.into_val(&env),
+                ],
+            },
+            sub_invocations: vec![&env],
+        });
+        env.authorize_as_current_contract(vec![&env, auth_entry]);
+
+        let campaign_client = CampaignContractClient::new(&env, &config.campaign_contract);
         campaign_client.mark_milestone_completed(&campaign_id, &milestone.amount);
 
         milestone.status = MilestoneStatus::Completed;
@@ -150,6 +220,18 @@ impl VerificationContract {
             .get(index)
             .unwrap_or_else(|| panic_with_error!(&env, VerificationError::MilestoneNotFound))
     }
+
+    pub fn get_config(env: Env, campaign_id: BytesN<32>) -> VerificationConfig {
+        Self::read_config(&env, &campaign_id)
+    }
+
+    fn read_config(env: &Env, campaign_id: &BytesN<32>) -> VerificationConfig {
+        let key = (symbol_short!("cfg"), campaign_id.clone());
+        env.storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(env, VerificationError::NotConfigured))
+    }
 }
 
 #[cfg(test)]
@@ -170,6 +252,7 @@ mod test {
 
         let creator = Address::generate(&env);
         let verifier = Address::generate(&env);
+        let donation_contract = Address::generate(&env);
         let campaign_id = BytesN::from_array(&env, &[1; 32]);
 
         campaign_client.initialize(
@@ -180,10 +263,20 @@ mod test {
             &1000,
         );
 
+        campaign_client.set_authorized_contracts(
+            &creator,
+            &campaign_id,
+            &Some(donation_contract.clone()),
+            &Some(verification_addr.clone()),
+        );
+
+        verification_client.configure_campaign(&creator, &campaign_addr, &campaign_id, &verifier);
+
         campaign_client.activate(&creator, &campaign_id);
         campaign_client.add_donation(&campaign_id, &500);
 
         let milestone = verification_client.create_milestone(
+            &creator,
             &campaign_id,
             &String::from_str(&env, "Drill first well"),
             &400,
@@ -195,7 +288,7 @@ mod test {
         let verified = verification_client.verify_milestone(&verifier, &campaign_id, &0, &docs);
         assert_eq!(verified.status, MilestoneStatus::Verified);
 
-        let completed = verification_client.complete_milestone(&campaign_addr, &campaign_id, &0);
+        let completed = verification_client.complete_milestone(&verifier, &campaign_id, &0);
         assert_eq!(completed.status, MilestoneStatus::Completed);
         assert!(completed.completed_at.is_some());
     }
