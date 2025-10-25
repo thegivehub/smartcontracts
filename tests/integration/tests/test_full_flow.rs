@@ -29,11 +29,21 @@ fn test_full_campaign_flow() {
         &1000,
     );
 
+    campaign_client.set_authorized_contracts(
+        &creator,
+        &campaign_id,
+        &Some(donation_addr.clone()),
+        &Some(verification_addr.clone()),
+    );
+
+    verification_client.configure_campaign(&creator, &campaign_addr, &campaign_id, &verifier);
+
     env.mock_all_auths();
     let active_campaign = campaign_client.activate(&creator, &campaign_id);
     assert_eq!(active_campaign.status, CampaignStatus::Active);
 
     let milestone = verification_client.create_milestone(
+        &creator,
         &campaign_id,
         &String::from_str(&env, "First Milestone"),
         &500,
@@ -51,7 +61,7 @@ fn test_full_campaign_flow() {
     let verified = verification_client.verify_milestone(&verifier, &campaign_id, &0, &docs);
     assert_eq!(verified.status, MilestoneStatus::Verified);
 
-    let completed = verification_client.complete_milestone(&campaign_addr, &campaign_id, &0);
+    let completed = verification_client.complete_milestone(&verifier, &campaign_id, &0);
     assert_eq!(completed.status, MilestoneStatus::Completed);
 
     let final_campaign = campaign_client.get(&campaign_id);

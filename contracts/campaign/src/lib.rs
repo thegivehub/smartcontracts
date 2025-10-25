@@ -24,6 +24,8 @@ pub struct Campaign {
     pub current_amount: i128,
     pub released_amount: i128,
     pub creator: Address,
+    pub donation_contract: Option<Address>,
+    pub verification_contract: Option<Address>,
     pub status: CampaignStatus,
     pub created_at: u64,
 }
@@ -38,6 +40,7 @@ pub enum CampaignError {
     NotActive = 4,
     Unauthorized = 5,
     InsufficientFunds = 6,
+    ContractsNotConfigured = 7,
 }
 
 #[contract]
@@ -67,11 +70,33 @@ impl CampaignContract {
             current_amount: 0,
             released_amount: 0,
             creator: creator.clone(),
+            donation_contract: None,
+            verification_contract: None,
             status: CampaignStatus::Draft,
             created_at: env.ledger().timestamp(),
         };
 
         env.storage().persistent().set(&campaign_id, &campaign);
+        campaign
+    }
+
+    pub fn set_authorized_contracts(
+        env: Env,
+        creator: Address,
+        campaign_id: BytesN<32>,
+        donation_contract: Option<Address>,
+        verification_contract: Option<Address>,
+    ) -> Campaign {
+        creator.require_auth();
+
+        let mut campaign = Self::get_campaign(&env, &campaign_id);
+        if campaign.creator != creator {
+            panic_with_error!(&env, CampaignError::Unauthorized);
+        }
+
+        campaign.donation_contract = donation_contract;
+        campaign.verification_contract = verification_contract;
+        Self::save_campaign(&env, &campaign_id, &campaign);
         campaign
     }
 
@@ -93,6 +118,10 @@ impl CampaignContract {
 
     pub fn add_donation(env: Env, campaign_id: BytesN<32>, amount: i128) -> Campaign {
         let mut campaign = Self::get_campaign(&env, &campaign_id);
+        match campaign.donation_contract {
+            Some(ref contract) => contract.require_auth(),
+            None => panic_with_error!(&env, CampaignError::ContractsNotConfigured),
+        }
         if campaign.status != CampaignStatus::Active && campaign.status != CampaignStatus::Funded {
             panic_with_error!(&env, CampaignError::NotActive);
         }
@@ -110,6 +139,10 @@ impl CampaignContract {
 
     pub fn mark_milestone_completed(env: Env, campaign_id: BytesN<32>, amount: i128) -> Campaign {
         let mut campaign = Self::get_campaign(&env, &campaign_id);
+        match campaign.verification_contract {
+            Some(ref contract) => contract.require_auth(),
+            None => panic_with_error!(&env, CampaignError::ContractsNotConfigured),
+        }
         let available = campaign.current_amount - campaign.released_amount;
         if available < amount {
             panic_with_error!(&env, CampaignError::InsufficientFunds);
@@ -152,6 +185,16 @@ impl CampaignContract {
             campaign.status,
             CampaignStatus::Active | CampaignStatus::Funded
         )
+    }
+
+    pub fn donation_contract(env: Env, campaign_id: BytesN<32>) -> Option<Address> {
+        let campaign = Self::get_campaign(&env, &campaign_id);
+        campaign.donation_contract
+    }
+
+    pub fn verification_contract(env: Env, campaign_id: BytesN<32>) -> Option<Address> {
+        let campaign = Self::get_campaign(&env, &campaign_id);
+        campaign.verification_contract
     }
 
     pub fn creator(env: Env, campaign_id: BytesN<32>) -> Address {
@@ -199,6 +242,16 @@ mod test {
             &1000,
         );
         assert_eq!(campaign.status, CampaignStatus::Draft);
+
+        let donation_contract = Address::generate(&env);
+        let verification_contract = Address::generate(&env);
+
+        client.set_authorized_contracts(
+            &creator,
+            &campaign_id,
+            &Some(donation_contract.clone()),
+            &Some(verification_contract.clone()),
+        );
 
         let active_campaign = client.activate(&creator, &campaign_id);
         assert_eq!(active_campaign.status, CampaignStatus::Active);

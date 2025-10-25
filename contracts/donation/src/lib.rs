@@ -1,8 +1,9 @@
 #![no_std]
 use givehub_campaign::CampaignContractClient;
 use soroban_sdk::{
+    auth::{ContractContext, InvokerContractAuthEntry, SubContractInvocation},
     contract, contracterror, contractimpl, contracttype, panic_with_error, vec, Address, BytesN,
-    Env, Map, String, Vec,
+    Env, IntoVal, Map, String, Symbol, Vec,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -21,6 +22,7 @@ pub struct Donation {
 pub enum DonationError {
     CampaignInactive = 1,
     InvalidAmount = 2,
+    Unauthorized = 3,
 }
 
 #[contract]
@@ -43,9 +45,30 @@ impl DonationContract {
         }
 
         let campaign_client = CampaignContractClient::new(&env, &campaign_contract);
-        if !campaign_client.is_active(&campaign_id) {
+        let campaign = campaign_client.get(&campaign_id);
+        if campaign.donation_contract != Some(env.current_contract_address()) {
+            panic_with_error!(&env, DonationError::Unauthorized);
+        }
+        if !matches!(
+            campaign.status,
+            givehub_campaign::CampaignStatus::Active | givehub_campaign::CampaignStatus::Funded
+        ) {
             panic_with_error!(&env, DonationError::CampaignInactive);
         }
+
+        let auth_entry = InvokerContractAuthEntry::Contract(SubContractInvocation {
+            context: ContractContext {
+                contract: campaign_contract.clone(),
+                fn_name: Symbol::new(&env, "add_donation"),
+                args: vec![
+                    &env,
+                    campaign_id.clone().into_val(&env),
+                    amount.into_val(&env),
+                ],
+            },
+            sub_invocations: vec![&env],
+        });
+        env.authorize_as_current_contract(vec![&env, auth_entry]);
 
         let donation = Donation {
             campaign_id: campaign_id.clone(),
@@ -123,6 +146,13 @@ mod test {
             &String::from_str(&env, "Save the Rainforest"),
             &String::from_str(&env, "Plant trees"),
             &500,
+        );
+
+        campaign_client.set_authorized_contracts(
+            &creator,
+            &campaign_id,
+            &Some(donation_addr.clone()),
+            &None,
         );
 
         let activated = campaign_client.activate(&creator, &campaign_id);
